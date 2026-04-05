@@ -1,0 +1,50 @@
+{
+  "name": "panoview-pro",
+  "version": "1.0.0",
+  "description": "高性能 360° 全景图片查看器",
+  "main": "electron/main.js",
+  "private": true,
+  "scripts": {
+    "dev": "vite",
+    "build:web": "vite build",
+    "electron:dev": "vite build && electron .",
+    "electron:build": "vite build && electron-builder --mac"
+  },
+  "dependencies": {
+    "three": "^0.182.0",
+    "react": "^19.2.4",
+    "lucide-react": "^0.563.0",
+    "@react-three/fiber": "^9.5.0",
+    "react-dom": "^19.2.4",
+    "@react-three/drei": "^10.7.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.14.0",
+    "@vitejs/plugin-react": "^5.0.0",
+    "typescript": "~5.8.2",
+    "vite": "^6.2.0",
+    "electron": "^34.0.0",
+    "electron-builder": "^25.1.0"
+  },
+  "build": {
+    "appId": "com.panoview.pro",
+    "productName": "PanoView Pro",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json"
+    ],
+    "mac": {
+      "category": "public.app-category.photography",
+      "target": [
+        {
+          "target": "zip",
+          "arch": ["x64", "arm64"]
+        }
+      ]
+    }
+  }
+}
