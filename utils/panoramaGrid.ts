@@ -1,8 +1,10 @@
+import * as THREE from 'three';
+
 /**
- * 从等距柱状投影全景图裁切四个方向（每方向 90°）的 16:9 画面，
- * 拼成 2×2 四宫格，返回 data URL 供预览。
+ * 从等距柱状全景图生成 2x2 场景概览。
  *
- * 裁切策略：水平四等分，垂直居中（赤道附近），零重采样。
+ * 这里按“截图”的思路处理：用正常视场的透视投影分别朝四个方向渲染。
+ * 横向保留少量重叠来避免漏场景，上下允许缺失，从而避免超广角畸变。
  */
 export function generatePanoramaGrid(imageSrc: string): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -11,22 +13,12 @@ export function generatePanoramaGrid(imageSrc: string): Promise<string> {
     img.onload = () => {
       try {
         const W = img.naturalWidth;
-        const H = img.naturalHeight;
+        const cellW = Math.max(1, Math.min(Math.floor(W / 4), MAX_CELL_WIDTH));
+        const cellH = Math.max(1, Math.round(cellW / CELL_ASPECT));
 
-        // 每方向裁切宽度（90° = W/4 像素）
-        const cropW = Math.floor(W / 4);
-        // 16:9 画幅高度
-        const cropH = Math.floor(cropW * 9 / 16);
-        // 垂直居中，防溢出
-        const finalH = Math.min(cropH, H);
-        const cropY = Math.floor((H - finalH) / 2);
-
-        // 间隔线粗细（按图宽自适应，最小 8px）
-        const gap = Math.max(8, Math.round(cropW / 80));
-
-        // 四宫格画布尺寸
-        const gridW = cropW * 2 + gap;
-        const gridH = finalH * 2 + gap;
+        const gap = Math.max(8, Math.round(cellW / 80));
+        const gridW = cellW * 2 + gap;
+        const gridH = cellH * 2 + gap;
 
         const canvas = document.createElement('canvas');
         canvas.width = gridW;
@@ -34,46 +26,24 @@ export function generatePanoramaGrid(imageSrc: string): Promise<string> {
         const ctx = canvas.getContext('2d');
         if (!ctx) throw new Error('Canvas 2D context unavailable');
 
-        // 黑底
         ctx.fillStyle = '#0a0a0a';
         ctx.fillRect(0, 0, gridW, gridH);
 
-        // 四个方向：以标准等距柱状投影约定，图片中心 = 0°（北）
-        // 北(0°) 中心 x=W/2, 东(90°) x=3W/4, 南(180°) x=0/W, 西(270°) x=W/4
-        const halfW = Math.floor(cropW / 2);
-        const directions = [
-          { label: '北', cx: Math.floor(W / 2),     row: 0, col: 0 },
-          { label: '东', cx: Math.floor(3 * W / 4), row: 0, col: 1 },
-          { label: '南', cx: 0,                      row: 1, col: 0 }, // 跨边界
-          { label: '西', cx: Math.floor(W / 4),     row: 1, col: 1 },
-        ];
+        const renderer = createScreenshotRenderer(img, cellW, cellH);
 
-        for (const dir of directions) {
-          const dx = dir.col * (cropW + gap);
-          const dy = dir.row * (finalH + gap);
+        try {
+          for (const dir of DIRECTIONS) {
+            const dx = dir.col * (cellW + gap);
+            const dy = dir.row * (cellH + gap);
 
-          // 裁切起点（可能为负数 → 跨边界）
-          let startX = dir.cx - halfW;
-
-          if (startX >= 0 && startX + cropW <= W) {
-            // 正常：不跨边界
-            ctx.drawImage(img, startX, cropY, cropW, finalH, dx, dy, cropW, finalH);
-          } else if (startX < 0) {
-            // 跨左边界：右端补到左端
-            const overflow = -startX;
-            ctx.drawImage(img, W - overflow, cropY, overflow, finalH, dx, dy, overflow, finalH);
-            ctx.drawImage(img, 0, cropY, cropW - overflow, finalH, dx + overflow, dy, cropW - overflow, finalH);
-          } else {
-            // 跨右边界
-            const leftPart = W - startX;
-            ctx.drawImage(img, startX, cropY, leftPart, finalH, dx, dy, leftPart, finalH);
-            ctx.drawImage(img, 0, cropY, cropW - leftPart, finalH, dx + leftPart, dy, cropW - leftPart, finalH);
+            renderer.render(dir.yaw);
+            ctx.drawImage(renderer.canvas, dx, dy, cellW, cellH);
+            drawLabel(ctx, dir.label, dx, dy, cellW);
           }
-
-          drawLabel(ctx, dir.label, dx, dy, cropW);
+        } finally {
+          renderer.dispose();
         }
 
-        // 返回 data URL 供预览
         resolve(canvas.toDataURL('image/png'));
       } catch (e) {
         reject(e);
@@ -89,7 +59,7 @@ export function generatePanoramaGrid(imageSrc: string): Promise<string> {
  * 弹出系统"另存为"对话框，让用户选择保存位置
  */
 export async function saveImage(dataUrl: string, filename: string): Promise<void> {
-  // data URL → Blob
+  // data URL -> Blob
   const res = await fetch(dataUrl);
   const blob = await res.blob();
 
@@ -129,7 +99,121 @@ export async function saveImage(dataUrl: string, filename: string): Promise<void
   }, 200);
 }
 
-// ─── helpers ───
+const CELL_ASPECT = 16 / 9;
+const MAX_CELL_WIDTH = 2560;
+const SCREENSHOT_VERTICAL_FOV_DEG = 68;
+
+const DIRECTIONS = [
+  { label: '北', yaw: 0, row: 0, col: 0 },
+  { label: '东', yaw: Math.PI / 2, row: 0, col: 1 },
+  { label: '南', yaw: Math.PI, row: 1, col: 0 },
+  { label: '西', yaw: -Math.PI / 2, row: 1, col: 1 },
+] as const;
+
+function createScreenshotRenderer(
+  img: HTMLImageElement,
+  width: number,
+  height: number,
+) {
+  const canvas = document.createElement('canvas');
+  const renderer = new THREE.WebGLRenderer({
+    canvas,
+    antialias: true,
+    alpha: false,
+    preserveDrawingBuffer: true,
+  });
+
+  renderer.setPixelRatio(1);
+  renderer.setSize(width, height, false);
+  renderer.setClearColor(0x0a0a0a, 1);
+  renderer.outputColorSpace = THREE.SRGBColorSpace;
+
+  const texture = new THREE.Texture(img);
+  texture.colorSpace = THREE.NoColorSpace;
+  texture.wrapS = THREE.RepeatWrapping;
+  texture.wrapT = THREE.ClampToEdgeWrapping;
+  texture.minFilter = THREE.LinearFilter;
+  texture.magFilter = THREE.LinearFilter;
+  texture.generateMipmaps = false;
+  texture.flipY = false;
+  texture.needsUpdate = true;
+
+  const uniforms = {
+    panoMap: { value: texture },
+    yaw: { value: 0 },
+    verticalFov: { value: THREE.MathUtils.degToRad(SCREENSHOT_VERTICAL_FOV_DEG) },
+    aspect: { value: CELL_ASPECT },
+  };
+
+  const material = new THREE.ShaderMaterial({
+    uniforms,
+    vertexShader: `
+      varying vec2 vUv;
+
+      void main() {
+        vUv = uv;
+        gl_Position = vec4(position.xy, 0.0, 1.0);
+      }
+    `,
+    fragmentShader: `
+      precision highp float;
+
+      uniform sampler2D panoMap;
+      uniform float yaw;
+      uniform float verticalFov;
+      uniform float aspect;
+      varying vec2 vUv;
+
+      const float PI = 3.1415926535897932384626433832795;
+
+      void main() {
+        vec2 p = vUv * 2.0 - 1.0;
+        float tanHalfFov = tan(verticalFov * 0.5);
+
+        vec3 dir = normalize(vec3(
+          p.x * aspect * tanHalfFov,
+          p.y * tanHalfFov,
+          -1.0
+        ));
+
+        float sy = sin(yaw);
+        float cy = cos(yaw);
+        vec3 worldDir = vec3(
+          dir.x * cy - dir.z * sy,
+          dir.y,
+          dir.x * sy + dir.z * cy
+        );
+
+        float u = 0.5 + atan(worldDir.x, -worldDir.z) / (2.0 * PI);
+        float v = 0.5 - asin(clamp(worldDir.y, -1.0, 1.0)) / PI;
+
+        gl_FragColor = texture2D(panoMap, vec2(fract(u), v));
+      }
+    `,
+    depthTest: false,
+    depthWrite: false,
+  });
+
+  const scene = new THREE.Scene();
+  const mesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), material);
+  scene.add(mesh);
+
+  const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+
+  return {
+    canvas,
+    render(yaw: number) {
+      uniforms.yaw.value = yaw;
+      renderer.render(scene, camera);
+    },
+    dispose() {
+      mesh.geometry.dispose();
+      material.dispose();
+      texture.dispose();
+      renderer.dispose();
+    },
+  };
+}
 
 function drawLabel(
   ctx: CanvasRenderingContext2D,
